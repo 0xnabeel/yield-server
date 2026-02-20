@@ -12,7 +12,7 @@ const poolsFactory = '0x5aEf44EDFc5A7eDd30826c724eA12D7Be15bDc30';
 const gaugeManager = '0x19a410046Afc4203AEcE5fbFc7A6Ac1a4F517AE2';
 const SNOVA = '0x00Da8466B296E382E5Da2Bf20962D0cB87200c78';
 
-const PROJECT = 'supernova';
+const PROJECT = 'supernova-amm';
 const CHAIN = 'ethereum';
 const SUBGRAPH =
   'https://api.goldsky.com/api/public/project_cm8gyxv0x02qv01uphvy69ey6/subgraphs/sn-basic-pools-mainnet/basicsnmainnet/gn';
@@ -23,7 +23,8 @@ const query = gql`
       id
       reserve0
       reserve1
-      untrackedVolumeUSD
+      volumeUSD
+      fee
       token0 {
         symbol
         id
@@ -76,29 +77,45 @@ async function getPoolVolumes(timestamp = null) {
 
   // calculate tvl
   dataNow = await utils.tvl(dataNow, CHAIN);
+  // map fee to feeTier (0.01 -> 1% -> 10000)
+  dataNow = dataNow.map((p) => ({
+    ...p,
+    feeTier: Number(p.fee) * 1000000,
+    // ensure volumeUSD is a number
+    volumeUSD: p.volumeUSD || 0
+  }));
   // calculate apy
-  dataNow = dataNow.map((el) => utils.apy(el, dataPrior, dataPrior7d, 'v3'));
+  dataNow = dataNow.map((el) => {
+    // handle case where prior volume is missing
+    const p1d = dataPrior.find(p => p.id === el.id);
+    const p7d = dataPrior7d.find(p => p.id === el.id);
+    return utils.apy(el, p1d ? [p1d] : [], p7d ? [p7d] : []);
+  });
 
   const pools = {};
-  for (const p of dataNow.filter(
-    (p) => p.volumeUSD1d >= 0 && (!isNaN(p.apy1d) || !isNaN(p.apy7d))
-  )) {
+  for (const p of dataNow) {
+    const poolAddress = utils.formatAddress(p.id);
+    // utils.apy might return NaN if volume data is missing
+    const apyBase = isNaN(p.apy1d) ? 0 : p.apy1d;
+    const apyBase7d = isNaN(p.apy7d) ? 0 : p.apy7d;
+    const volumeUsd1d = isNaN(p.volumeUSD1d) ? 0 : p.volumeUSD1d;
+    const volumeUsd7d = isNaN(p.volumeUSD7d) ? 0 : p.volumeUSD7d;
+
     const url = 'https://supernova.xyz/liquidity';
     const underlyingTokens = [p.token0.id, p.token1.id];
 
-    const poolAddress = utils.formatAddress(p.id);
     pools[poolAddress] = {
       pool: poolAddress,
       chain: utils.formatChain(CHAIN),
       project: PROJECT,
       symbol: `${p.token0.symbol}-${p.token1.symbol}`,
       tvlUsd: p.totalValueLockedUSD,
-      apyBase: p.apy1d,
-      apyBase7d: p.apy7d,
+      apyBase,
+      apyBase7d,
       underlyingTokens,
       url,
-      volumeUsd1d: p.volumeUSD1d,
-      volumeUsd7d: p.volumeUSD7d,
+      volumeUsd1d,
+      volumeUsd7d,
     };
   }
 
@@ -114,8 +131,6 @@ const getGaugeApy = async () => {
     })
   ).output;
 
-  console.log("allPairsLength", allPairsLength)
-
   const allPools = (
     await sdk.api.abi.multiCall({
       calls: [...Array(Number(allPairsLength)).keys()].map((i) => ({
@@ -127,8 +142,6 @@ const getGaugeApy = async () => {
     })
   ).output.map((o) => o.output);
 
-  console.log("allPools", allPools)
-
   const metaData = (
     await sdk.api.abi.multiCall({
       calls: allPools.map((i) => ({
@@ -138,8 +151,6 @@ const getGaugeApy = async () => {
       chain: CHAIN,
     })
   ).output.map((o) => o.output);
-
-  console.log("metaData", metaData)
 
   const symbols = (
     await sdk.api.abi.multiCall({
@@ -151,8 +162,6 @@ const getGaugeApy = async () => {
     })
   ).output.map((o) => o.output);
 
-  console.log("symbols", symbols)
-
   const gauges = (
     await sdk.api.abi.multiCall({
       calls: allPools.map((i) => ({
@@ -163,8 +172,6 @@ const getGaugeApy = async () => {
       chain: CHAIN,
     })
   ).output.map((o) => o.output);
-
-  console.log("gauges", gauges)
 
   // remove pools without valid gauges
   const validIndices = [];
@@ -179,8 +186,6 @@ const getGaugeApy = async () => {
     }
   });
 
-  console.log("validIndices", validIndices)
-
   const rewardRate = (
     await sdk.api.abi.multiCall({
       calls: validGauges.map((i) => ({
@@ -192,8 +197,6 @@ const getGaugeApy = async () => {
     })
   ).output.map((o) => o.output);
 
-  console.log("rewardRate", rewardRate)
-
   const poolSupply = (
     await sdk.api.abi.multiCall({
       calls: validPools.map((i) => ({ target: i })),
@@ -202,8 +205,6 @@ const getGaugeApy = async () => {
       permitFailure: true,
     })
   ).output.map((o) => o.output);
-
-  console.log("poolSupply", poolSupply)
 
   const totalSupply = (
     await sdk.api.abi.multiCall({
@@ -216,8 +217,6 @@ const getGaugeApy = async () => {
     })
   ).output.map((o) => o.output);
 
-  console.log("totalSupply", totalSupply)
-
   const tokens = [
     ...new Set(
       metaData
@@ -226,8 +225,6 @@ const getGaugeApy = async () => {
         .concat(SNOVA)
     ),
   ];
-
-  console.log("tokens", tokens)
 
   const maxSize = 50;
   const pages = Math.ceil(tokens.length / maxSize);
@@ -245,17 +242,15 @@ const getGaugeApy = async () => {
         .coins,
     ];
   }
-  console.log("pricesA", pricesA)
   let prices = {};
   for (const p of pricesA.flat()) {
     prices = { ...prices, ...p };
   }
 
-  console.log("prices", prices)
-
   const pools = validPools.map((p, i) => {
     const originalIndex = validIndices[i];
     const poolMeta = metaData[originalIndex];
+    const s = symbols[originalIndex];
     const r0 = poolMeta.r0 / poolMeta.dec0;
     const r1 = poolMeta.r1 / poolMeta.dec1;
 
@@ -263,8 +258,6 @@ const getGaugeApy = async () => {
     const p1 = prices[`${CHAIN}:${poolMeta.t1}`]?.price || 0;
 
     const tvlUsd = r0 * p0 + r1 * p1;
-
-    const s = symbols[originalIndex];
 
     const pairPrice = tvlUsd > 0 && totalSupply[i] > 0
       ? (tvlUsd * 1e18) / totalSupply[i]
@@ -288,7 +281,7 @@ const getGaugeApy = async () => {
       pool: utils.formatAddress(p),
       chain: utils.formatChain(CHAIN),
       project: PROJECT,
-      symbol: utils.formatSymbol(s.split('-')[1]),
+      symbol: s.includes('-') ? s.split('-').slice(1).join('-').replace('/', '-') : s,
       tvlUsd,
       apyReward,
       rewardTokens: apyReward ? [SNOVA] : [],
@@ -297,22 +290,16 @@ const getGaugeApy = async () => {
     };
   });
 
-  console.log("pools", pools)
-
   const poolsApy = {};
-  console.log("pools filtered: ", pools.filter((p) => utils.keepFinite(p)))
   for (const pool of pools.filter((p) => utils.keepFinite(p))) {
     poolsApy[pool.pool] = pool;
   }
-
-  console.log("poolsApy", poolsApy)
 
   return poolsApy;
 };
 
 async function main(timestamp = null) {
   const poolsApy = await getGaugeApy();
-  console.log("poolsApy", poolsApy)
   let poolsVolumes = {};
   try {
     poolsVolumes = await getPoolVolumes(timestamp);

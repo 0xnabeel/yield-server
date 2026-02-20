@@ -42,6 +42,7 @@ const query = gql`
     volumeUSD
     volumeToken0
     fee
+    tickSpacing
     token0 {
       symbol
       id
@@ -128,7 +129,8 @@ async function getPoolVolumes(timestamp = null) {
 
     const pools = {}
     for (const p of dataNow.filter(p => p.volumeUSD1d >= 0 && (!isNaN(p.apy1d) || !isNaN(p.apy7d)))) {
-        const url = 'https://supernova.xyz/liquidity/' + p.id;
+        const poolType = Number(p.tickSpacing) > 1 ? 'Concentrated%20Volatile' : 'Concentrated%20Stable';
+        const url = `https://supernova.xyz/deposit?token0=${p.token0.id}&token1=${p.token1.id}&pair=${p.id}&type=${poolType}`;
         const feePercent = (Number(p.fee) / 1e6) * 100;
         const poolMeta = 'CL' + ' - ' + feePercent.toFixed(2) + '%';
         const underlyingTokens = [p.token0.id, p.token1.id];
@@ -166,6 +168,7 @@ const getGaugeApy = async () => {
         ) {
           id
           fee
+          tickSpacing
           totalValueLockedUSD
           token0 {
             id
@@ -267,6 +270,8 @@ const getGaugeApy = async () => {
     }
 
     const pools = validPools.map((p, i) => {
+        const poolType = Number(p.tickSpacing) > 1 ? 'Concentrated%20Volatile' : 'Concentrated%20Stable';
+        const url = `https://supernova.xyz/deposit?token0=${p.token0.id}&token1=${p.token1.id}&pair=${p.id}&type=${poolType}`;
         const balT0 = tokenBalances.find(
             (b) => b.input.params[0] === p.id && b.input.target === p.token0.id
         );
@@ -302,7 +307,7 @@ const getGaugeApy = async () => {
             rewardTokens: apyReward ? [SNOVA] : [],
             underlyingTokens: [p.token0.id, p.token1.id],
             poolMeta,
-            url: 'https://supernova.xyz/liquidity/' + p.id,
+            url,
         };
     });
 

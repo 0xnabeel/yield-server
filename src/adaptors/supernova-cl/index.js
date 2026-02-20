@@ -94,9 +94,35 @@ async function getPoolVolumes(timestamp = null) {
     const dataPrior7d = (
         await request(SUBGRAPH, queryPriorC.replace('<PLACEHOLDER>', blockPrior7d))
     ).pools;
+    // Use on-chain balances for accurate CL TVL
+    const balanceCalls = [];
+    for (const pool of dataNow) {
+        balanceCalls.push({ target: pool.token0.id, params: pool.id });
+        balanceCalls.push({ target: pool.token1.id, params: pool.id });
+    }
+
+    const tokenBalances = await sdk.api.abi.multiCall({
+        abi: 'erc20:balanceOf',
+        calls: balanceCalls,
+        chain: CHAIN,
+        permitFailure: true,
+    });
+
+    dataNow = dataNow.map((p) => {
+        const x = tokenBalances.output.filter((i) => i.input.params[0] === p.id);
+        const t0 = x.find((i) => i.input.target === p.token0.id);
+        const t1 = x.find((i) => i.input.target === p.token1.id);
+        return {
+            ...p,
+            reserve0: t0 && t0.output ? t0.output / `1e${p.token0.decimals}` : p.reserve0,
+            reserve1: t1 && t1.output ? t1.output / `1e${p.token1.decimals}` : p.reserve1,
+        };
+    });
 
     // calculate tvl
     dataNow = await utils.tvl(dataNow, CHAIN);
+    // Algebra fee is in hundredths of bip – map to feeTier for utils.apy
+    dataNow = dataNow.map((p) => ({ ...p, feeTier: Number(p.fee) }));
     // calculate apy
     dataNow = dataNow.map((el) => utils.apy(el, dataPrior, dataPrior7d, 'v3'));
 
@@ -128,51 +154,92 @@ async function getPoolVolumes(timestamp = null) {
 }
 
 const getGaugeApy = async () => {
-    const chunkSize = 400;
-    let currentOffset = 1650; // Ignore older non-Slipstream pools
-    let unfinished = true;
-    let allPoolsData = [];
+    // Get all CL pools from Algebra subgraph
+    const { pools: subgraphPools } = await request(
+        SUBGRAPH,
+        gql`
+      {
+        pools(
+          first: 1000
+          orderBy: totalValueLockedUSD
+          orderDirection: desc
+        ) {
+          id
+          fee
+          totalValueLockedUSD
+          token0 {
+            id
+            symbol
+            decimals
+          }
+          token1 {
+            id
+            symbol
+            decimals
+          }
+        }
+      }
+    `
+    );
 
-    while (unfinished) {
-        const poolsChunkUnfiltered = (
-            await sdk.api.abi.call({
-                target: sugar,
-                params: [chunkSize, currentOffset],
-                abi: abiSugar.find((m) => m.name === 'all'),
-                chain: CHAIN,
-            })
-        ).output;
+    const poolAddresses = subgraphPools.map((p) => p.id);
 
-        const poolsChunk = poolsChunkUnfiltered.filter(t => Number(t.type) > 0 && t.gauge != nullAddress);
+    // Look up gauges for each pool via GaugeManager
+    const gaugeResults = (
+        await sdk.api.abi.multiCall({
+            calls: poolAddresses.map((addr) => ({
+                target: gaugeManager,
+                params: [addr],
+            })),
+            abi: abiGaugeManager[0],
+            chain: CHAIN,
+            permitFailure: true,
+        })
+    ).output.map((o) => o.output);
 
-        unfinished = poolsChunkUnfiltered.length !== 0;
-        currentOffset += chunkSize;
-        allPoolsData.push(...poolsChunk);
+    // Filter to pools with valid gauges
+    const validPools = [];
+    const validGauges = [];
+    gaugeResults.forEach((gauge, i) => {
+        if (gauge && gauge !== nullAddress) {
+            validPools.push(subgraphPools[i]);
+            validGauges.push(gauge);
+        }
+    });
+
+    if (validPools.length === 0) return {};
+
+    // Fetch rewardRate from each GaugeCL
+    const rewardRates = (
+        await sdk.api.abi.multiCall({
+            calls: validGauges.map((g) => ({ target: g })),
+            abi: abiGaugeCL[0],
+            chain: CHAIN,
+            permitFailure: true,
+        })
+    ).output.map((o) => o.output);
+
+    // Fetch on-chain token balances for TVL
+    const balanceCalls = [];
+    for (const pool of validPools) {
+        balanceCalls.push({ target: pool.token0.id, params: pool.id });
+        balanceCalls.push({ target: pool.token1.id, params: pool.id });
     }
 
-    unfinished = true;
-    currentOffset = 0;
-    let allTokenData = [];
+    const tokenBalances = (
+        await sdk.api.abi.multiCall({
+            abi: 'erc20:balanceOf',
+            calls: balanceCalls,
+            chain: CHAIN,
+            permitFailure: true,
+        })
+    ).output;
 
-    while (unfinished) {
-        const tokensChunk = (
-            await sdk.api.abi.call({
-                target: sugar,
-                params: [chunkSize, currentOffset, sugar, []],
-                abi: abiSugar.find((m) => m.name === 'tokens'),
-                chain: CHAIN,
-            })
-        ).output;
-
-        unfinished = tokensChunk.length !== 0;
-        currentOffset += chunkSize;
-        allTokenData.push(...tokensChunk);
-    }
-
+    // Fetch prices
     const tokens = [
         ...new Set(
-            allPoolsData
-                .map((m) => [m.token0, m.token1])
+            validPools
+                .map((p) => [p.token0.id, p.token1.id])
                 .flat()
                 .concat(SNOVA)
         ),
@@ -182,9 +249,9 @@ const getGaugeApy = async () => {
     const pages = Math.ceil(tokens.length / maxSize);
     let pricesA = [];
     let x = '';
-    for (const p of [...Array(pages).keys()]) {
+    for (const pg of [...Array(pages).keys()]) {
         x = tokens
-            .slice(p * maxSize, maxSize * (p + 1))
+            .slice(pg * maxSize, maxSize * (pg + 1))
             .map((i) => `${CHAIN}:${i}`)
             .join(',')
             .replaceAll('/', '');
@@ -199,82 +266,43 @@ const getGaugeApy = async () => {
         prices = { ...prices, ...p };
     }
 
-    let allStakedData = [];
-    for (let pool of allPoolsData) {
-        // don't waste RPC calls if gauge has no staked liquidity
-        if (Number(pool.gauge_liquidity) == 0) {
-            allStakedData.push({ 'amount0': 0, 'amount1': 0 });
-            continue;
-        }
+    const pools = validPools.map((p, i) => {
+        const balT0 = tokenBalances.find(
+            (b) => b.input.params[0] === p.id && b.input.target === p.token0.id
+        );
+        const balT1 = tokenBalances.find(
+            (b) => b.input.params[0] === p.id && b.input.target === p.token1.id
+        );
 
-        const wideTickAmount = tickWidthMappings[Number(pool.type)] !== undefined ? tickWidthMappings[Number(pool.type)] : 5;
-        const lowTick = Number(pool.tick) - (wideTickAmount * Number(pool.type));
-        const highTick = Number(pool.tick) + ((wideTickAmount - 1) * Number(pool.type));
+        const r0 = balT0 && balT0.output ? balT0.output / 10 ** Number(p.token0.decimals) : 0;
+        const r1 = balT1 && balT1.output ? balT1.output / 10 ** Number(p.token1.decimals) : 0;
 
-        const ratioA = (
-            await sdk.api.abi.call({
-                target: sugarHelper,
-                params: [lowTick],
-                abi: abiSugarHelper.find((m) => m.name === 'getSqrtRatioAtTick'),
-                chain: CHAIN,
-            })
-        ).output;
+        const p0 = prices[`${CHAIN}:${p.token0.id}`]?.price || 0;
+        const p1 = prices[`${CHAIN}:${p.token1.id}`]?.price || 0;
 
-        const ratioB = (
-            await sdk.api.abi.call({
-                target: sugarHelper,
-                params: [highTick],
-                abi: abiSugarHelper.find((m) => m.name === 'getSqrtRatioAtTick'),
-                chain: CHAIN,
-            })
-        ).output;
+        const tvlUsd = r0 * p0 + r1 * p1;
 
-        // fetch staked liquidity around wide set of ticks
-        const stakedAmounts = (
-            await sdk.api.abi.call({
-                target: sugarHelper,
-                params: [pool.sqrt_ratio, ratioA, ratioB, pool.gauge_liquidity],
-                abi: abiSugarHelper.find((m) => m.name === 'getAmountsForLiquidity'),
-                chain: CHAIN,
-            })
-        ).output;
-
-        allStakedData.push(stakedAmounts);
-    }
-
-    const pools = allPoolsData.map((p, i) => {
-        const token0Data = allTokenData.find(({ token_address }) => token_address == p.token0);
-        const token1Data = allTokenData.find(({ token_address }) => token_address == p.token1);
-
-        const p0 = prices[`${CHAIN}:${p.token0}`]?.price;
-        const p1 = prices[`${CHAIN}:${p.token1}`]?.price;
-
-        const tvlUsd = ((p.reserve0 / (10 ** token0Data.decimals)) * p0) + ((p.reserve1 / (10 ** token1Data.decimals)) * p1);
-
-        // use wider staked TVL across many ticks
-        const stakedTvlUsd = ((allStakedData[i]['amount0'] / (10 ** token0Data.decimals)) * p0) + ((allStakedData[i]['amount1'] / (10 ** token1Data.decimals)) * p1);
-
-        const s = token0Data.symbol + '-' + token1Data.symbol;
-
+        const snovaPrice = prices[`${CHAIN}:${SNOVA}`]?.price || 0;
         const apyReward =
-            (((p.emissions / 1e18) * 86400 * 365 * prices[`${CHAIN}:${SNOVA}`]?.price) /
-                stakedTvlUsd) *
-            100;
+            tvlUsd > 0 && snovaPrice > 0 && rewardRates[i] && rewardRates[i] !== '0'
+                ? ((rewardRates[i] / 1e18) * 86400 * 365 * snovaPrice * 100) / tvlUsd
+                : 0;
 
-        const url = 'https://supernova.xyz/liquidity/' + p.lp;
-        const poolMeta = 'CL' + p.type.toString() + ' - ' + (p.pool_fee / 10000).toString() + '%';
+        const s = p.token0.symbol + '-' + p.token1.symbol;
+        const feePercent = (Number(p.fee) / 1e6) * 100;
+        const poolMeta = 'CL' + ' - ' + feePercent.toFixed(2) + '%';
 
         return {
-            pool: utils.formatAddress(p.lp),
+            pool: utils.formatAddress(p.id),
             chain: utils.formatChain(CHAIN),
             project: PROJECT,
             symbol: s,
             tvlUsd,
             apyReward,
             rewardTokens: apyReward ? [SNOVA] : [],
-            underlyingTokens: [p.token0, p.token1],
+            underlyingTokens: [p.token0.id, p.token1.id],
             poolMeta,
-            url,
+            url: 'https://supernova.xyz/liquidity/' + p.id,
         };
     });
 
@@ -288,7 +316,13 @@ const getGaugeApy = async () => {
 
 async function main(timestamp = null) {
     const poolsApy = await getGaugeApy();
-    const poolsVolumes = await getPoolVolumes(timestamp);
+
+    let poolsVolumes = {};
+    try {
+        poolsVolumes = await getPoolVolumes(timestamp);
+    } catch (e) {
+        console.log('Failed to fetch volume data from subgraph:', e.message);
+    }
 
     // left-join volumes onto APY output to avoid filtering out pools
     return Object.values(poolsApy).map((pool) => {
@@ -306,4 +340,5 @@ async function main(timestamp = null) {
 module.exports = {
     timetravel: false,
     apy: main,
+    url: 'https://supernova.xyz/liquidity',
 };

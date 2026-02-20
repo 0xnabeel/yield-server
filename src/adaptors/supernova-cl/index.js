@@ -152,7 +152,7 @@ const getGaugeApy = async () => {
             allPoolsData
                 .map((m) => [m.token0, m.token1])
                 .flat()
-                .concat(AERO)
+                .concat(SNOVA)
         ),
     ];
 
@@ -235,7 +235,7 @@ const getGaugeApy = async () => {
         const s = token0Data.symbol + '-' + token1Data.symbol;
 
         const apyReward =
-            (((p.emissions / 1e18) * 86400 * 365 * prices[`${CHAIN}:${AERO}`]?.price) /
+            (((p.emissions / 1e18) * 86400 * 365 * prices[`${CHAIN}:${SNOVA}`]?.price) /
                 stakedTvlUsd) *
             100;
 
@@ -249,7 +249,7 @@ const getGaugeApy = async () => {
             symbol: s,
             tvlUsd,
             apyReward,
-            rewardTokens: apyReward ? [AERO] : [],
+            rewardTokens: apyReward ? [SNOVA] : [],
             underlyingTokens: [p.token0, p.token1],
             poolMeta,
             url,

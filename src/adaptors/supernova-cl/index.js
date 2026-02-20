@@ -12,6 +12,27 @@ const CHAIN = 'ethereum';
 const SUBGRAPH =
     'https://api.goldsky.com/api/public/project_cm8gyxv0x02qv01uphvy69ey6/subgraphs/core/algebrasnmainnet/gn';
 
+// ABI fragments for on-chain gauge calls
+const abiGaugeManager = [
+    {
+        inputs: [{ internalType: 'address', name: '', type: 'address' }],
+        name: 'gauges',
+        outputs: [{ internalType: 'address', name: '', type: 'address' }],
+        stateMutability: 'view',
+        type: 'function',
+    },
+];
+
+const abiGaugeCL = [
+    {
+        inputs: [],
+        name: 'rewardRate',
+        outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+        stateMutability: 'view',
+        type: 'function',
+    },
+];
+
 const query = gql`
 {
   pools(first: 1000, orderBy: totalValueLockedUSD, orderDirection: desc, block: {number: <PLACEHOLDER>}) {
@@ -82,7 +103,8 @@ async function getPoolVolumes(timestamp = null) {
     const pools = {}
     for (const p of dataNow.filter(p => p.volumeUSD1d >= 0 && (!isNaN(p.apy1d) || !isNaN(p.apy7d)))) {
         const url = 'https://supernova.xyz/liquidity/' + p.id;
-        const poolMeta = 'CL' + ' - ' + (Number(p.feeTier) / 10000).toString() + '%';
+        const feePercent = (Number(p.fee) / 1e6) * 100;
+        const poolMeta = 'CL' + ' - ' + feePercent.toFixed(2) + '%';
         const underlyingTokens = [p.token0.id, p.token1.id];
 
         const poolAddress = utils.formatAddress(p.id);

@@ -88,7 +88,7 @@ async function getPoolVolumes(timestamp = null) {
         const poolAddress = utils.formatAddress(p.id);
         pools[poolAddress] = {
             pool: poolAddress,
-            chain: utils.formatChain('base'),
+            chain: utils.formatChain(CHAIN),
             project: PROJECT,
             poolMeta,
             symbol: `${p.token0.symbol}-${p.token1.symbol}`,
@@ -117,7 +117,7 @@ const getGaugeApy = async () => {
                 target: sugar,
                 params: [chunkSize, currentOffset],
                 abi: abiSugar.find((m) => m.name === 'all'),
-                chain: 'base',
+                chain: CHAIN,
             })
         ).output;
 
@@ -138,7 +138,7 @@ const getGaugeApy = async () => {
                 target: sugar,
                 params: [chunkSize, currentOffset, sugar, []],
                 abi: abiSugar.find((m) => m.name === 'tokens'),
-                chain: 'base',
+                chain: CHAIN,
             })
         ).output;
 
@@ -163,7 +163,7 @@ const getGaugeApy = async () => {
     for (const p of [...Array(pages).keys()]) {
         x = tokens
             .slice(p * maxSize, maxSize * (p + 1))
-            .map((i) => `base:${i}`)
+            .map((i) => `${CHAIN}:${i}`)
             .join(',')
             .replaceAll('/', '');
         pricesA = [
@@ -194,7 +194,7 @@ const getGaugeApy = async () => {
                 target: sugarHelper,
                 params: [lowTick],
                 abi: abiSugarHelper.find((m) => m.name === 'getSqrtRatioAtTick'),
-                chain: 'base',
+                chain: CHAIN,
             })
         ).output;
 
@@ -203,7 +203,7 @@ const getGaugeApy = async () => {
                 target: sugarHelper,
                 params: [highTick],
                 abi: abiSugarHelper.find((m) => m.name === 'getSqrtRatioAtTick'),
-                chain: 'base',
+                chain: CHAIN,
             })
         ).output;
 
@@ -213,7 +213,7 @@ const getGaugeApy = async () => {
                 target: sugarHelper,
                 params: [pool.sqrt_ratio, ratioA, ratioB, pool.gauge_liquidity],
                 abi: abiSugarHelper.find((m) => m.name === 'getAmountsForLiquidity'),
-                chain: 'base',
+                chain: CHAIN,
             })
         ).output;
 
@@ -224,8 +224,8 @@ const getGaugeApy = async () => {
         const token0Data = allTokenData.find(({ token_address }) => token_address == p.token0);
         const token1Data = allTokenData.find(({ token_address }) => token_address == p.token1);
 
-        const p0 = prices[`base:${p.token0}`]?.price;
-        const p1 = prices[`base:${p.token1}`]?.price;
+        const p0 = prices[`${CHAIN}:${p.token0}`]?.price;
+        const p1 = prices[`${CHAIN}:${p.token1}`]?.price;
 
         const tvlUsd = ((p.reserve0 / (10 ** token0Data.decimals)) * p0) + ((p.reserve1 / (10 ** token1Data.decimals)) * p1);
 
@@ -235,7 +235,7 @@ const getGaugeApy = async () => {
         const s = token0Data.symbol + '-' + token1Data.symbol;
 
         const apyReward =
-            (((p.emissions / 1e18) * 86400 * 365 * prices[`base:${AERO}`]?.price) /
+            (((p.emissions / 1e18) * 86400 * 365 * prices[`${CHAIN}:${AERO}`]?.price) /
                 stakedTvlUsd) *
             100;
 
@@ -244,7 +244,7 @@ const getGaugeApy = async () => {
 
         return {
             pool: utils.formatAddress(p.lp),
-            chain: utils.formatChain('base'),
+            chain: utils.formatChain(CHAIN),
             project: PROJECT,
             symbol: s,
             tvlUsd,

@@ -20,14 +20,16 @@ const query = gql`
     reserve1: totalValueLockedToken1
     volumeUSD
     volumeToken0
-    feeTier
+    fee
     token0 {
       symbol
       id
+      decimals
     }
     token1 {
       symbol
       id
+      decimals
     }
   }
 }
@@ -79,7 +81,7 @@ async function getPoolVolumes(timestamp = null) {
 
     const pools = {}
     for (const p of dataNow.filter(p => p.volumeUSD1d >= 0 && (!isNaN(p.apy1d) || !isNaN(p.apy7d)))) {
-        const url = 'https://aerodrome.finance/deposit?token0=' + p.token0.id + '&token1=' + p.token1.id + '&factory=' + p.factory;
+        const url = 'https://supernova.xyz/liquidity/' + p.id;
         const poolMeta = 'CL' + ' - ' + (Number(p.feeTier) / 10000).toString() + '%';
         const underlyingTokens = [p.token0.id, p.token1.id];
 
@@ -237,7 +239,7 @@ const getGaugeApy = async () => {
                 stakedTvlUsd) *
             100;
 
-        const url = 'https://aerodrome.finance/deposit?token0=' + p.token0 + '&token1=' + p.token1 + '&type=' + p.type.toString() + '&factory=' + p.factory;
+        const url = 'https://supernova.xyz/liquidity/' + p.lp;
         const poolMeta = 'CL' + p.type.toString() + ' - ' + (p.pool_fee / 10000).toString() + '%';
 
         return {
